@@ -38,12 +38,42 @@ class ComputeRepository:
         )
         return dict(self.quota(subject_type, subject_key))
 
-    def count_user_states(self, requested_by: str) -> dict[str, int]:
-        rows = self.connection.execute("SELECT status,COUNT(*) AS amount FROM compute_tasks WHERE requested_by=? GROUP BY status", (requested_by,)).fetchall()
+    @staticmethod
+    def _subject_column(subject_type: str) -> str | None:
+        return {"user": "requested_by", "project": "project_code"}.get(subject_type)
+
+    def count_states_by_subject(self, subject_type: str, subject_key: str) -> dict[str, int]:
+        column = self._subject_column(subject_type)
+        if column is None:
+            return {}
+        rows = self.connection.execute(f"SELECT status,COUNT(*) AS amount FROM compute_tasks WHERE {column}=? GROUP BY status", (subject_key,)).fetchall()
         return {str(row["status"]): int(row["amount"]) for row in rows}
 
-    def count_user_submissions_since(self, requested_by: str, since: str) -> int:
-        return int(self.connection.execute("SELECT COUNT(*) FROM compute_tasks WHERE requested_by=? AND created_at>=?", (requested_by, since)).fetchone()[0])
+    def count_submissions_since(self, subject_type: str, subject_key: str, since: str) -> int:
+        column = self._subject_column(subject_type)
+        if column is None:
+            return 0
+        return int(self.connection.execute(f"SELECT COUNT(*) FROM compute_tasks WHERE {column}=? AND created_at>=?", (subject_key, since)).fetchone()[0])
+
+    def running_counts_by_users(self, owners: Iterable[str]) -> dict[str, int]:
+        """统计每个用户仍占用运行额度的服务单数量。
+
+        running 与 cancel_requested 都仍持有车辆/人工资源，统一计入运行用量，
+        避免取消请求中的订单被重复放行。
+        """
+        owner_list = sorted(set(owners))
+        if not owner_list:
+            return {}
+        placeholders = ",".join("?" for _ in owner_list)
+        rows = self.connection.execute(
+            f"SELECT requested_by,COUNT(*) AS amount FROM compute_tasks WHERE status IN ('running','cancel_requested') AND requested_by IN ({placeholders}) GROUP BY requested_by",
+            owner_list,
+        ).fetchall()
+        return {str(row["requested_by"]): int(row["amount"]) for row in rows}
+
+    def list_quotas(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM compute_quotas ORDER BY subject_type,subject_key").fetchall()
+        return [dict(row) for row in rows]
 
     def task_by_id(self, task_id: int) -> sqlite3.Row | None:
         return self.connection.execute("SELECT t.*,tpl.code AS template_code,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.id=?", (task_id,)).fetchone()
@@ -58,7 +88,7 @@ class ComputeRepository:
         )
         return dict(self.task_by_id(cursor.lastrowid))
 
-    def queued_candidate(self, capabilities: Iterable[str], now: str) -> sqlite3.Row | None:
+    def queued_candidates(self, capabilities: Iterable[str], now: str, limit: int = 100) -> list[sqlite3.Row]:
         capability_list = sorted(set(capabilities))
         params: list[Any] = [now]
         condition = ""
@@ -66,10 +96,11 @@ class ComputeRepository:
             placeholders = ",".join("?" for _ in capability_list)
             condition = f" AND tpl.algorithm IN ({placeholders})"
             params.extend(capability_list)
+        params.append(max(1, limit))
         return self.connection.execute(
-            "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT 1",
+            "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT ?",
             params,
-        ).fetchone()
+        ).fetchall()
 
     def result_versions(self, task_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute("SELECT * FROM compute_results WHERE task_id=? ORDER BY version", (task_id,)).fetchall()]
@@ -82,6 +113,19 @@ class ComputeRepository:
             "INSERT INTO compute_interventions(task_id,actor,action,reason,before_json,after_json,batch_key,created_at) VALUES(?,?,?,?,?,?,?,?)",
             (task_id, actor, action, reason, json.dumps(before, ensure_ascii=False, sort_keys=True), json.dumps(after, ensure_ascii=False, sort_keys=True), batch_key, now),
         )
+
+    def add_quota_event(self, *, subject_type: str, subject_key: str, task_id: int, dimension: str, action: str, reason: str, day_bucket: str, now: str) -> None:
+        self.connection.execute(
+            "INSERT INTO compute_quota_events(subject_type,subject_key,task_id,dimension,action,reason,day_bucket,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (subject_type, subject_key, task_id, dimension, action, reason, day_bucket, now),
+        )
+
+    def quota_events(self, subject_type: str, subject_key: str, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM compute_quota_events WHERE subject_type=? AND subject_key=? ORDER BY id DESC LIMIT ?",
+            (subject_type, subject_key, max(1, min(limit, 500))),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_tasks(self, *, status: str | None, project_code: str | None, requested_by: str | None, limit: int) -> list[dict[str, Any]]:
         clauses: list[str] = []

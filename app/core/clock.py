@@ -24,6 +24,22 @@ def from_storage(value: str | None) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def day_start(value: datetime) -> datetime:
+    """返回该时刻所属结算日的起始时刻。
+
+    全系统统一的跨日结算边界：UTC 零点。额度日结、用量统计和
+    审计台账的日桶都以此函数为准，避免各处自行取舍时区。
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def day_bucket(value: datetime) -> str:
+    """返回该时刻所属结算日的日期桶标识（如 2026-10-03）。"""
+    return to_storage(day_start(value))[:10]
+
+
 class Clock(Protocol):
     def now(self) -> datetime: ...
 

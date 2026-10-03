@@ -5,6 +5,7 @@ import json
 
 from fastapi.testclient import TestClient
 
+from app.compute.service import ComputeOperationsService
 from app.database import database_path, get_connection, init_db
 from app.main import app
 
@@ -76,6 +77,21 @@ def command_compute_demo() -> int:
     return 0 if task.status_code == 202 and claimed.status_code == 200 and claimed.json().get("task") else 1
 
 
+def command_compute_recover() -> int:
+    init_db()
+    result = ComputeOperationsService(get_connection()).recover_expired(actor="cli-recovery")
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def command_compute_quota_report() -> int:
+    init_db()
+    report = ComputeOperationsService(get_connection()).quota_report()
+    report["database"] = str(database_path())
+    print(json.dumps(report, ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="ceremony-operations", description="红白喜事服务运营平台维护入口")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -83,8 +99,17 @@ def main() -> int:
     subparsers.add_parser("check-db", help="检查数据库完整性")
     subparsers.add_parser("smoke", help="执行本地 API 冒烟检查")
     subparsers.add_parser("compute-demo", help="执行计算任务提交与领取演示")
+    subparsers.add_parser("compute-recover", help="恢复过期租约并结转取消请求，稳定订单状态与额度")
+    subparsers.add_parser("compute-quota-report", help="输出全部已配置额度主体的用量与剩余额度")
     args = parser.parse_args()
-    return {"init-db": command_init, "check-db": command_check, "smoke": command_smoke, "compute-demo": command_compute_demo}[args.command]()
+    return {
+        "init-db": command_init,
+        "check-db": command_check,
+        "smoke": command_smoke,
+        "compute-demo": command_compute_demo,
+        "compute-recover": command_compute_recover,
+        "compute-quota-report": command_compute_quota_report,
+    }[args.command]()
 
 
 if __name__ == "__main__":

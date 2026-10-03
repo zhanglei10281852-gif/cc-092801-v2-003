@@ -293,6 +293,19 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+CREATE TABLE IF NOT EXISTS compute_quota_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_type TEXT NOT NULL CHECK(subject_type IN ('user','role','project')),
+    subject_key TEXT NOT NULL,
+    task_id INTEGER REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    dimension TEXT NOT NULL CHECK(dimension IN ('queued','running','daily_submissions')),
+    action TEXT NOT NULL CHECK(action IN ('acquire','release')),
+    reason TEXT NOT NULL,
+    day_bucket TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compute_quota_events_subject ON compute_quota_events(subject_type,subject_key,id);
+CREATE INDEX IF NOT EXISTS idx_compute_quota_events_task ON compute_quota_events(task_id,id);
 '''
 
 PERMISSIONS = [

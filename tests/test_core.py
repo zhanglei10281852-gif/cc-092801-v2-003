@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.core.clock import FrozenClock, from_storage, to_storage
+from app.core.clock import FrozenClock, day_bucket, day_start, from_storage, to_storage
 from app.core.errors import ValidationError
 from app.core.security import hash_password, normalize_username, request_fingerprint, verify_password
 from app.services.jobs import JobService
@@ -26,6 +26,17 @@ def test_request_fingerprint_is_order_independent():
 def test_clock_storage_round_trip():
     value = datetime(2026, 9, 24, 8, 30, tzinfo=UTC)
     assert from_storage(to_storage(value)) == value
+
+
+def test_unified_day_boundary_uses_utc_midnight():
+    late = datetime(2026, 10, 3, 23, 59, 59, tzinfo=UTC)
+    early = datetime(2026, 10, 4, 0, 0, 0, tzinfo=UTC)
+    assert to_storage(day_start(late)) == "2026-10-03T00:00:00+00:00"
+    assert to_storage(day_start(early)) == "2026-10-04T00:00:00+00:00"
+    assert day_bucket(late) == "2026-10-03"
+    assert day_bucket(early) == "2026-10-04"
+    naive = datetime(2026, 10, 3, 12, 0, 0)
+    assert day_bucket(naive) == "2026-10-03"
 
 
 def test_job_claim_complete_and_deduplicate(client):

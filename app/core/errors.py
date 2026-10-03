@@ -21,6 +21,12 @@ class ConflictError(DomainError):
     code = "conflict"
 
 
+class QuotaExceededError(ConflictError):
+    """额度不足：context 中携带维度、上限、已用与剩余额度，便于调用方解释。"""
+
+    code = "quota_exceeded"
+
+
 class AuthenticationError(DomainError):
     status_code = 401
     code = "authentication_failed"

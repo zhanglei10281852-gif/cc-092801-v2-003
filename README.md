@@ -48,6 +48,22 @@ python -m app.cli smoke
 python -m app.cli compute-demo
 ```
 
+额度维护命令：
+
+```bash
+python -m app.cli compute-recover        # 恢复过期租约、结转取消请求
+python -m app.cli compute-quota-report   # 输出全部额度主体的用量与剩余额度
+```
+
+## 额度核算约定
+
+- 每个幂等键在同一家庭（`requested_by`）下只产生一个可追踪的服务单；重复提交返回原单，不重复计额。
+- 提交时核算排队额度（`max_queued`）与当日提交额度（`daily_submissions`）；领取时核算运行额度（`max_running`），运行额度已满的家庭会被跳过，不会绕过额度进入执行队列。
+- 排队、运行（含取消请求中）、取消、失败重试等状态对额度的占用与释放一致；每次扣减与释放都会写入 `compute_quota_events` 审计台账。
+- 跨日结算统一使用 UTC 零点边界（`app.core.clock.day_start`）。
+- 超额请求返回 409 与 `quota_exceeded` 错误码，`context` 中携带维度、上限、已用与剩余额度。
+- 可通过 `GET /api/compute/quotas/usage` 查看用量与剩余额度，`GET /api/compute/quotas/events` 查看额度审计台账。
+
 ## 目录结构
 
 ```text

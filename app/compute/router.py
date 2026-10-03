@@ -27,6 +27,16 @@ def set_quota(payload: QuotaSet, actor: str = Query(..., min_length=1)):
     return service().set_quota(payload.model_dump(), actor)
 
 
+@router.get("/quotas/usage")
+def quota_usage(subject_key: str = Query(..., min_length=1), subject_type: str = Query(default="user", pattern="^(user|role|project)$")):
+    return service().quota_usage(subject_type, subject_key)
+
+
+@router.get("/quotas/events")
+def quota_events(subject_key: str = Query(..., min_length=1), subject_type: str = Query(default="user", pattern="^(user|role|project)$"), limit: int = Query(default=100, ge=1, le=500)):
+    return {"items": service().quota_events(subject_type, subject_key, limit)}
+
+
 @router.post("/tasks", status_code=202)
 def submit_task(payload: TaskSubmit):
     return service().submit(payload.model_dump())
