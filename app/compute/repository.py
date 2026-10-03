@@ -38,12 +38,41 @@ class ComputeRepository:
         )
         return dict(self.quota(subject_type, subject_key))
 
-    def count_user_states(self, requested_by: str) -> dict[str, int]:
-        rows = self.connection.execute("SELECT status,COUNT(*) AS amount FROM compute_tasks WHERE requested_by=? GROUP BY status", (requested_by,)).fetchall()
-        return {str(row["status"]): int(row["amount"]) for row in rows}
+    def quota_usage(self, subject_type: str, subject_key: str, business_day: str) -> dict[str, int]:
+        """按台账汇总当前占用：排队/运行取全量净额，当日提交取业务日净额。"""
+        rows = self.connection.execute(
+            "SELECT bucket,COALESCE(SUM(delta),0) AS amount FROM compute_quota_ledger "
+            "WHERE subject_type=? AND subject_key=? AND (bucket='daily' AND business_day=? OR bucket<>'daily') "
+            "GROUP BY bucket",
+            (subject_type, subject_key, business_day),
+        ).fetchall()
+        usage = {"queued": 0, "running": 0, "daily": 0}
+        for row in rows:
+            usage[str(row["bucket"])] = max(0, int(row["amount"]))
+        return usage
 
-    def count_user_submissions_since(self, requested_by: str, since: str) -> int:
-        return int(self.connection.execute("SELECT COUNT(*) FROM compute_tasks WHERE requested_by=? AND created_at>=?", (requested_by, since)).fetchone()[0])
+    def ledger_entries_for_task(self, task_id: int) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM compute_quota_ledger WHERE task_id=? ORDER BY id", (task_id,)
+            ).fetchall()
+        ]
+
+    def add_ledger_entry(self, *, subject_type: str, subject_key: str, task_id: int, bucket: str, delta: int, business_day: str, reason: str, actor: str = "", idempotency_key: str = "", now: str) -> None:
+        self.connection.execute(
+            "INSERT INTO compute_quota_ledger(subject_type,subject_key,task_id,bucket,delta,business_day,reason,actor,idempotency_key,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (subject_type, subject_key, task_id, bucket, delta, business_day, reason, actor, idempotency_key, now),
+        )
+
+    def ledger_task_holds(self, task_id: int) -> dict[str, int]:
+        """该任务当前仍占有的额度桶及数量（正常每个桶至多 1）。"""
+        rows = self.connection.execute(
+            "SELECT bucket,COALESCE(SUM(delta),0) AS amount FROM compute_quota_ledger WHERE task_id=? GROUP BY bucket HAVING amount>0",
+            (task_id,),
+        ).fetchall()
+        return {str(row["bucket"]): int(row["amount"]) for row in rows}
 
     def task_by_id(self, task_id: int) -> sqlite3.Row | None:
         return self.connection.execute("SELECT t.*,tpl.code AS template_code,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.id=?", (task_id,)).fetchone()
@@ -51,14 +80,14 @@ class ComputeRepository:
     def task_by_idempotency(self, requested_by: str, key: str) -> sqlite3.Row | None:
         return self.connection.execute("SELECT * FROM compute_tasks WHERE requested_by=? AND idempotency_key=?", (requested_by, key)).fetchone()
 
-    def create_task(self, *, template_id: int, project_code: str, requested_by: str, parameters: dict[str, Any], parameter_digest: str, priority: int, idempotency_key: str, max_attempts: int, now: str) -> dict[str, Any]:
+    def create_task(self, *, template_id: int, project_code: str, requested_by: str, parameters: dict[str, Any], parameter_digest: str, priority: int, idempotency_key: str, max_attempts: int, quota_subject_type: str, quota_subject_key: str, now: str) -> dict[str, Any]:
         cursor = self.connection.execute(
-            "INSERT INTO compute_tasks(template_id,project_code,requested_by,parameters_json,parameter_digest,priority,idempotency_key,status,attempt_count,max_attempts,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,?)",
-            (template_id, project_code, requested_by, json.dumps(parameters, ensure_ascii=False, sort_keys=True), parameter_digest, priority, idempotency_key, max_attempts, now, now, now),
+            "INSERT INTO compute_tasks(template_id,project_code,requested_by,parameters_json,parameter_digest,priority,idempotency_key,status,attempt_count,max_attempts,available_at,quota_subject_type,quota_subject_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,?,?,?)",
+            (template_id, project_code, requested_by, json.dumps(parameters, ensure_ascii=False, sort_keys=True), parameter_digest, priority, idempotency_key, max_attempts, now, quota_subject_type, quota_subject_key, now, now),
         )
         return dict(self.task_by_id(cursor.lastrowid))
 
-    def queued_candidate(self, capabilities: Iterable[str], now: str) -> sqlite3.Row | None:
+    def queued_candidates(self, capabilities: Iterable[str], now: str, *, limit: int = 1) -> list[sqlite3.Row]:
         capability_list = sorted(set(capabilities))
         params: list[Any] = [now]
         condition = ""
@@ -66,10 +95,11 @@ class ComputeRepository:
             placeholders = ",".join("?" for _ in capability_list)
             condition = f" AND tpl.algorithm IN ({placeholders})"
             params.extend(capability_list)
+        params.append(limit)
         return self.connection.execute(
-            "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT 1",
+            "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT ?",
             params,
-        ).fetchone()
+        ).fetchall()
 
     def result_versions(self, task_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute("SELECT * FROM compute_results WHERE task_id=? ORDER BY version", (task_id,)).fetchall()]

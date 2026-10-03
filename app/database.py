@@ -261,6 +261,8 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
     current_result_version INTEGER,
     last_error_code TEXT NOT NULL DEFAULT '',
     last_error_message TEXT NOT NULL DEFAULT '',
+    quota_subject_type TEXT NOT NULL DEFAULT '' CHECK(quota_subject_type IN ('','user','role','project')),
+    quota_subject_key TEXT NOT NULL DEFAULT '',
     version INTEGER NOT NULL DEFAULT 1,
     started_at TEXT,
     finished_at TEXT,
@@ -293,6 +295,21 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+CREATE TABLE IF NOT EXISTS compute_quota_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_type TEXT NOT NULL CHECK(subject_type IN ('user','role','project')),
+    subject_key TEXT NOT NULL,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    bucket TEXT NOT NULL CHECK(bucket IN ('queued','running','daily')),
+    delta INTEGER NOT NULL CHECK(delta IN (-1,1)),
+    business_day TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compute_ledger_subject ON compute_quota_ledger(subject_type,subject_key,bucket,business_day);
+CREATE INDEX IF NOT EXISTS idx_compute_ledger_task ON compute_quota_ledger(task_id,id);
 '''
 
 PERMISSIONS = [
@@ -359,10 +376,57 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+
+
+def _migrate_compute_quota_ledger(connection: sqlite3.Connection) -> None:
+    """老库补齐额度台账所需列，并为存量任务回填初始台账。"""
+    if _table_exists(connection, "compute_tasks"):
+        columns = _table_columns(connection, "compute_tasks")
+        if "quota_subject_type" not in columns:
+            connection.execute("ALTER TABLE compute_tasks ADD COLUMN quota_subject_type TEXT NOT NULL DEFAULT ''")
+        if "quota_subject_key" not in columns:
+            connection.execute("ALTER TABLE compute_tasks ADD COLUMN quota_subject_key TEXT NOT NULL DEFAULT ''")
+    connection.execute(
+        "UPDATE compute_tasks SET quota_subject_type='user',quota_subject_key=requested_by "
+        "WHERE (quota_subject_type='' OR quota_subject_key='')"
+    )
+    if not _table_exists(connection, "compute_quota_ledger"):
+        return
+    existing = connection.execute("SELECT COUNT(*) FROM compute_quota_ledger").fetchone()[0]
+    if existing:
+        return
+    connection.execute(
+        """
+        INSERT INTO compute_quota_ledger
+            (subject_type,subject_key,task_id,bucket,delta,business_day,reason,actor,idempotency_key,created_at)
+        SELECT 'user',t.requested_by,t.id,'daily',1,substr(t.created_at,1,10),'legacy_backfill','migration','',t.created_at
+        FROM compute_tasks t
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO compute_quota_ledger
+            (subject_type,subject_key,task_id,bucket,delta,business_day,reason,actor,idempotency_key,created_at)
+        SELECT 'user',t.requested_by,t.id,
+               CASE WHEN t.status='running' THEN 'running' ELSE 'queued' END,1,
+               substr(t.created_at,1,10),'legacy_backfill','migration','',t.created_at
+        FROM compute_tasks t
+        WHERE t.status IN ('queued','running')
+        """
+    )
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _migrate_compute_quota_ledger(connection)
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",

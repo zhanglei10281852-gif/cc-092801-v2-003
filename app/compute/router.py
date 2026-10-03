@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app.compute.schemas import BatchOperation, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, TaskClaim, TaskFailure, TaskResult, TaskSubmit, TemplateCreate
+from app.compute.schemas import BatchOperation, CancelAcknowledge, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, TaskClaim, TaskFailure, TaskResult, TaskSubmit, TemplateCreate
 from app.compute.service import ComputeOperationsService
+from app.core.errors import ValidationError
 
 router = APIRouter(prefix="/api/compute", tags=["仪式服务订单运营"])
 
@@ -25,6 +26,13 @@ def create_template(payload: TemplateCreate, actor: str = Query(..., min_length=
 @router.put("/quotas")
 def set_quota(payload: QuotaSet, actor: str = Query(..., min_length=1)):
     return service().set_quota(payload.model_dump(), actor)
+
+
+@router.get("/quotas/{subject_type}/{subject_key:path}")
+def quota_status(subject_type: str, subject_key: str):
+    if subject_type != "user":
+        raise ValidationError("目前仅支持按家庭（user）查询额度")
+    return service().quota_status(subject_key)
 
 
 @router.post("/tasks", status_code=202)
@@ -65,6 +73,11 @@ def fail_task(task_id: int, payload: TaskFailure):
 @router.post("/tasks/{task_id}/cancel")
 def cancel_task(task_id: int, payload: CancelRequest):
     return service().cancel(task_id, payload.actor, payload.reason)
+
+
+@router.post("/tasks/{task_id}/cancel-ack")
+def acknowledge_cancel(task_id: int, payload: CancelAcknowledge):
+    return service().acknowledge_cancel(task_id, payload.worker_id, payload.note)
 
 
 @router.post("/tasks/{task_id}/retry")

@@ -21,6 +21,11 @@ class ConflictError(DomainError):
     code = "conflict"
 
 
+class QuotaExceededError(ConflictError):
+    status_code = 409
+    code = "quota_exceeded"
+
+
 class AuthenticationError(DomainError):
     status_code = 401
     code = "authentication_failed"
